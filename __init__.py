@@ -64,10 +64,19 @@ web = GetGlobals('web')
 module = GetParams("module")
 global terminate_chromedriver, _is_port_free, _find_free_port, _to_bool
 def terminate_chromedriver(port):
+    if not port:
+        return
     for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-        if proc.info['name'] == 'chromedriver.exe' and f'--port={port}' in proc.info['cmdline']:
-            proc.kill()
-            break
+        try:
+            name = (proc.info.get('name') or '').lower()
+            cmdline = proc.info.get('cmdline') or []
+            if name in ('chromedriver', 'chromedriver.exe') and any(
+                arg == f'--port={port}' for arg in cmdline
+            ):
+                proc.kill()
+                break
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
 
 
 def _is_port_free(port):
@@ -234,6 +243,8 @@ if module == "openBrowser":
     force_renderer = eval(GetParams("force_renderer_accessibility")) if GetParams("force_renderer_accessibility") else False
     download_dir=GetParams("downloads_folder")
     session = GetParams("session")
+    if not session:
+        session = 'default'
 
     if folder == None or folder == "":
         folder = " "
@@ -282,10 +293,13 @@ if module == "openBrowser":
         raise e
 
 if module == "closeBrowser":
+    mod_chromedriver_port = None
+    session = GetParams("session")
+    if not session:
+        session = 'default'
     try:
-        session = GetParams("session")
         browser_driver = web.driver_list[session]
-        mod_chromedriver_port = browser_driver.service.port
+        mod_chromedriver_port = getattr(getattr(browser_driver, "service", None), "port", None)
         browser_driver.close()
         browser_driver.quit()
         web.driver_list.pop(session, None)
