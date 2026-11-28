@@ -108,6 +108,7 @@ class BrowserAutomation:
    
     def __init__(self, browser="chrome", driver_path=None, browser_path="", folderPath="", port="5002", search=False, download_dir=None, session_name="default"):
         self.driver = None
+        self.browser_process = None
         self.driver_path = driver_path
         self.browser = browser
         self.browser_path = browser_path
@@ -157,13 +158,30 @@ class BrowserAutomation:
         self.__browser_path = path
 
     def launch_browser(self, force_renderer=False):
-        import subprocess
+        """ import subprocess
+            browser_path = self.browser_path
+            if SYSTEM == "Darwin":
+                browser_path = f'"{browser_path}"'
+            if force_renderer:
+                subprocess.Popen(" ".join([browser_path, "--force-renderer-accessibility --kiosk-printing --remote-debugging-port=" + self.port, "--user-data-dir=" + self.profile_path, "--disable-features=LocalNetworkAccessChecks"]), shell=True)
+            else:
+                subprocess.Popen(" ".join([browser_path, "--kiosk-printing --remote-debugging-port=" + self.port, "--user-data-dir=" + self.profile_path, "--disable-features=LocalNetworkAccessChecks"]), shell=True)
+        """
+        profile_path = self.profile_path.strip('"')
+        arguments = [
+            self.browser_path,
+            "--kiosk-printing",
+            "--remote-debugging-port=" + self.port,
+            "--user-data-dir=" + profile_path,
+            "--disable-features=LocalNetworkAccessChecks"
+        ]
         if force_renderer:
-            # print("for renderer")
-            subprocess.Popen(" ".join([self.browser_path, "--force-renderer-accessibility --kiosk-printing --remote-debugging-port=" + self.port, "--user-data-dir=" + self.profile_path, "--disable-features=LocalNetworkAccessChecks"]), shell=True)
+            arguments.insert(1, "--force-renderer-accessibility")
+        if SYSTEM == "Darwin":
+            self.browser_process = subprocess.Popen(arguments)
         else:
-            subprocess.Popen(" ".join([self.browser_path, "--kiosk-printing --remote-debugging-port=" + self.port, "--user-data-dir=" + self.profile_path, "--disable-features=LocalNetworkAccessChecks"]), shell=True)
-    
+            self.browser_process = subprocess.Popen(" ".join(arguments), shell=True)
+
     def open(self, force_renderer=False):
         global Options, Chrome
         self.launch_browser(force_renderer=force_renderer)
@@ -171,6 +189,7 @@ class BrowserAutomation:
             chrome_options = Options()
             chrome_options.debugger_address = "127.0.0.1:" + self.port
             self.driver = Chrome(chrome_options=chrome_options, executable_path=self.driver_path)
+            self.driver._rocketbot_browser_process = self.browser_process
             self.set_download_dir()
             return self.driver
     
@@ -194,6 +213,7 @@ class BrowserAutomation:
             chrome_options.debugger_address = "127.0.0.1:" + self.port
             self.driver = Chrome(chrome_options=chrome_options, executable_path=self.driver_path)
             # Anti-detection: remove navigator.webdriver from current session and all future pages
+            self.driver._rocketbot_browser_process = self.browser_process
             self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
                 "source":
@@ -232,6 +252,54 @@ class BrowserAutomation:
             except Exception:
                 print("Could not pin download folder via CDP:", repr(e))
 
+def close_browser_session(browser_driver):
+    browser_process = getattr(
+        browser_driver,
+        "_rocketbot_browser_process",
+        None
+    )
+
+    if SYSTEM != "Darwin":
+        mod_chromedriver_port = getattr(
+            getattr(browser_driver, "service", None), "port", None
+        )
+
+        try:
+            browser_driver.close()
+        except Exception:
+            pass
+
+        try:
+            browser_driver.quit()
+        except Exception:
+            if SYSTEM == "Windows":
+                if mod_chromedriver_port:
+                    try:
+                        terminate_chromedriver(mod_chromedriver_port)
+                    except Exception:
+                        pass
+
+                try:
+                    browser_driver.quit()
+                except Exception:
+                    pass
+
+        return
+
+    try:
+        browser_driver.quit()
+    except Exception:
+        pass
+
+    if browser_process and browser_process.poll() is None:
+        browser_process.terminate()
+
+        try:
+            browser_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            browser_process.kill()
+            browser_process.wait(timeout=5)
+
 if module == "openBrowser":
 
     url = GetParams("url")
@@ -242,9 +310,7 @@ if module == "openBrowser":
     search_port = GetParams("search_port")
     force_renderer = eval(GetParams("force_renderer_accessibility")) if GetParams("force_renderer_accessibility") else False
     download_dir=GetParams("downloads_folder")
-    session = GetParams("session")
-    if not session:
-        session = 'default'
+    session = GetParams("session") or "default"
 
     if folder == None or folder == "":
         folder = " "
@@ -259,9 +325,7 @@ if module == "openBrowser":
         browser_ = "chrome"
         if session in web.driver_list:
             try:
-                web.driver_list[session].quit()
-            except Exception:
-                pass
+                close_browser_session(web.driver_list[session])
             finally:
                 web.driver_list.pop(session, None)
 
@@ -293,24 +357,10 @@ if module == "openBrowser":
         raise e
 
 if module == "closeBrowser":
-    mod_chromedriver_port = None
-    session = GetParams("session")
-    if not session:
-        session = 'default'
+    session = GetParams("session") or "default"
     try:
-        browser_driver = web.driver_list[session]
-        mod_chromedriver_port = getattr(getattr(browser_driver, "service", None), "port", None)
-        browser_driver.close()
-        browser_driver.quit()
+        browser_driver = web.driver_list.get(session)
+        if browser_driver:
+            close_browser_session(browser_driver)
+    finally:
         web.driver_list.pop(session, None)
-
-    except Exception as e:
-        try:
-            terminate_chromedriver(mod_chromedriver_port)
-            if session in web.driver_list:
-                web.driver_list[session].quit()
-                web.driver_list.pop(session, None)
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            raise e
